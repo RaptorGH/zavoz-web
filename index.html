@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zavoz · переписка</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --line:#e5e7eb; --in:#eef2ff; --out:#ecfdf5; --accent:#2563eb; --err:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --card:#1a1e24; --text:#e6e8eb; --muted:#9aa3af; --line:#2a2f37; --in:#1e2740; --out:#14302a; --accent:#6ea0ff; --err:#f87171; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:8px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  label { display:block; font-size:14px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; margin-top:14px; }
+  button.link { background:none; color:var(--accent); padding:4px 0; margin:0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:space-between; margin-bottom:12px; }
+  .msg { padding:10px 12px; border-radius:10px; margin:8px 0; white-space:pre-wrap; word-break:break-word; }
+  .msg.in { background:var(--in); margin-right:12%; }
+  .msg.out { background:var(--out); margin-left:12%; }
+  .meta { font-size:12px; color:var(--muted); margin-top:4px; }
+  .err { color:var(--err); margin-top:10px; font-size:14px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Переписка бота Zavoz</h1>
+
+  <section id="login" class="card">
+    <label for="email">Почта</label>
+    <input id="email" type="email" autocomplete="username">
+    <label for="password">Пароль</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <button id="signin">Войти</button>
+    <div id="loginErr" class="err"></div>
+    <p class="muted">Доступ только по приглашению. Без входа данные не отдаются.</p>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="row">
+      <select id="dialog" aria-label="Диалог"></select>
+      <span><span id="who" class="muted"></span> <button id="signout" class="link">Выйти</button></span>
+    </div>
+    <div id="list"></div>
+    <div id="appErr" class="err"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+  // Публичные значения: адрес проекта и publishable-ключ (безопасны при включённом RLS). Секретных ключей здесь нет.
+  const SUPABASE_URL = 'https://auvxkluwnpzujmzjgrrv.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_uodbY6cD_c-CYIr6vaZw7A_ybnlRAJH';
+  const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const $ = (id) => document.getElementById(id);
+
+  function textOf(raw) {
+    const m = raw && raw.message ? raw.message : raw || {};
+    if (m.text) return m.text;
+    if (m.voice) return '🎤 голосовое, ' + m.voice.duration + ' с';
+    if (m.audio) return '🎵 аудио «' + (m.audio.file_name || 'без имени') + '», ' + Math.round((m.audio.duration || 0) / 60) + ' мин';
+    if (m.document) return '📎 документ «' + (m.document.file_name || '') + '»';
+    return '(тип сообщения без текста)';
+  }
+
+  function fmt(iso) {
+    return new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  async function loadDialogs() {
+    $('appErr').textContent = '';
+    const { data, error } = await db.from('telegram_users').select('telegram_id, display_name, username').order('last_message_at', { ascending: false });
+    if (error) { $('appErr').textContent = 'Ошибка: ' + error.message; return; }
+    if (!data.length) { $('list').innerHTML = '<p class="muted">Нет доступных диалогов. У аккаунта должна быть роль viewer.</p>'; $('dialog').innerHTML = ''; return; }
+    $('dialog').innerHTML = data.map((u) => `<option value="${u.telegram_id}">${(u.display_name || u.username || u.telegram_id).replace(/</g, '&lt;')}</option>`).join('');
+    await loadMessages();
+  }
+
+  async function loadMessages() {
+    const id = $('dialog').value;
+    const { data, error } = await db.from('messages').select('id, message_id, direction, raw, status, created_at').eq('telegram_id', id).order('id', { ascending: true });
+    if (error) { $('appErr').textContent = 'Ошибка: ' + error.message; return; }
+    $('list').innerHTML = data.map((m) => {
+      const t = textOf(m.raw).replace(/</g, '&lt;');
+      return `<div class="msg ${m.direction}">${t}<div class="meta">${m.direction === 'in' ? 'пользователь' : 'бот'} · №${m.message_id} · ${fmt(m.created_at)} · ${m.status}</div></div>`;
+    }).join('') || '<p class="muted">Сообщений нет.</p>';
+  }
+
+  function show(session) {
+    const on = !!session;
+    $('login').classList.toggle('hidden', on);
+    $('app').classList.toggle('hidden', !on);
+    if (on) { $('who').textContent = session.user.email; loadDialogs(); }
+  }
+
+  $('signin').onclick = async () => {
+    $('loginErr').textContent = '';
+    const { error } = await db.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+    if (error) $('loginErr').textContent = 'Не удалось войти: ' + error.message;
+  };
+  $('signout').onclick = () => db.auth.signOut();
+  $('dialog').onchange = loadMessages;
+  db.auth.onAuthStateChange((_e, session) => show(session));
+  db.auth.getSession().then(({ data }) => show(data.session));
+</script>
+</body>
+</html>
